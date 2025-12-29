@@ -314,42 +314,60 @@ static int is_comment(const char* line) {
 static void handle_if_statement(FILE* fp) {
     if (!fp) return;
     char line[MAX_LINE];
-    char condition[MAX_LINE];
+    char condition[MAX_LINE] = "";
 
     // Read the condition line
     if (fgets(line, sizeof(line), fp)) {
         line[strcspn(line, "\r\n")] = 0;
 
-        // Extract condition - it should be on this line
-        char* condition_start = line;
-        while (*condition_start == ' ') condition_start++;
-
-        // Find 'then' to extract condition (could be 'then' or '; then')
-        char* then_pos = strstr(condition_start, "; then");
+        // Check if 'then' is on the same line
+        char* then_pos = strstr(line, "; then");
+        if (!then_pos) {
+            then_pos = strstr(line, " then");  // Space before 'then'
+        }
+        
         if (then_pos) {
+            // Extract condition from 'if ... then'
             *then_pos = '\0';
-            strcpy(condition, condition_start);
+            strcpy(condition, line);
         }
         else {
-            then_pos = strstr(condition_start, "then");
-            if (then_pos) {
-                *then_pos = '\0';
-                strcpy(condition, condition_start);
-            }
-            else {
-                strcpy(condition, condition_start);
-                // Read next line for 'then'
-                if (fgets(line, sizeof(line), fp)) {
-                    line[strcspn(line, "\r\n")] = 0;
+            // 'then' might be on the next line, so just copy the whole line
+            strcpy(condition, line);
+            
+            // Check if current line ends with 'then' or contains 'then' in a different format
+            char* stripped_line = line;
+            while (*stripped_line == ' ' || *stripped_line == '\t') stripped_line++;
+            
+            // If it contains 'if' but no 'then', read next line to see if it's 'then'
+            if (strncmp(stripped_line, "if ", 3) == 0 || strcmp(stripped_line, "if") == 0) {
+                // Read next line to see if it's just 'then'
+                char next_line[MAX_LINE];
+                if (fgets(next_line, sizeof(next_line), fp)) {
+                    next_line[strcspn(next_line, "\r\n")] = 0;
+                    char* next_stripped = next_line;
+                    while (*next_stripped == ' ' || *next_stripped == '\t') next_stripped++;
+                    
+                    if (strcmp(next_stripped, "then") == 0) {
+                        // The condition is in the original line, 'then' is on next line
+                        strcpy(condition, line);
+                    } else {
+                        // The next line is not 'then', so we put it back conceptually
+                        // For now, we'll just continue with the condition from the first line
+                        strcpy(condition, line);
+                    }
                 }
             }
         }
         
         // Remove 'if' from the beginning of the condition if present
-        if (strncmp(condition, "if", 2) == 0 && (condition[2] == ' ' || condition[2] == '\t')) {
+        if (strncmp(condition, "if", 2) == 0) {
             char* temp = condition + 2;
-            while (*temp == ' ' || *temp == '\t') temp++;
-            strcpy(condition, temp);
+            if (*temp == ' ' || *temp == '\t') {
+                temp++;
+                while (*temp == ' ' || *temp == '\t') temp++;
+                strcpy(condition, temp);
+            }
         }
     }
 
@@ -361,6 +379,17 @@ static void handle_if_statement(FILE* fp) {
     // Read commands until elif, else, or fi
     while (fgets(line, sizeof(line), fp)) {
         line[strcspn(line, "\r\n")] = 0;
+
+        // Check if this is a continuation of the condition with 'then' on a separate line
+        if (block_len == 0) {  // First command block, check if we just had the condition
+            char* stripped_line = line;
+            while (*stripped_line == ' ' || *stripped_line == '\t') stripped_line++;
+            
+            if (strcmp(stripped_line, "then") == 0) {
+                // This is just 'then', continue reading commands
+                continue;
+            }
+        }
 
         if (strncmp(line, "elif", 4) == 0) {
             elif_found = 1;
@@ -456,36 +485,32 @@ static int is_case_pattern(const char* line) {
 static void handle_case_statement(FILE* fp) {
     if (!fp) return;
     char line[MAX_LINE];
-    char case_expr[MAX_LINE] = "";
+    char case_var[64] = "";
 
-    // Read the case expression line (e.g., "case $name in")
+    // Read and process the "case ... in" line to extract variable
     if (fgets(line, sizeof(line), fp)) {
         line[strcspn(line, "\r\n")] = 0;
-        strcpy(case_expr, line);
-    }
-
-    // Extract variable from "case $name in"
-    char* case_start = case_expr;
-    while (*case_start == ' ') case_start++;
-    if (strncmp(case_start, "case ", 5) == 0) {
-        case_start += 5;
-    }
-
-    char* in_pos = strstr(case_start, " in");
-    if (!in_pos) {
-        in_pos = strstr(case_start, "in");
-    }
-    if (!in_pos) return;
-
-    *in_pos = '\0';
-    char case_var[64];
-    strcpy(case_var, case_start);
-
-    // Trim trailing spaces
-    char* end = case_var + strlen(case_var) - 1;
-    while (end > case_var && (*end == ' ' || *end == '\t')) {
-        *end = '\0';
-        end--;
+        
+        // Extract variable from "case $name in"
+        char* case_start = line;
+        while (*case_start == ' ' || *case_start == '\t') case_start++;
+        
+        // Find "in" to extract the variable/expression
+        char* in_pos = strstr(case_start, " in");
+        if (!in_pos) {
+            in_pos = strstr(case_start, "in");
+        }
+        if (!in_pos) return;
+        
+        *in_pos = '\0';
+        strcpy(case_var, case_start);
+        
+        // Trim spaces from variable
+        char* end = case_var + strlen(case_var) - 1;
+        while (end > case_var && (*end == ' ' || *end == '\t')) {
+            *end = '\0';
+            end--;
+        }
     }
 
     // Get the value to match
@@ -494,84 +519,123 @@ static void handle_case_statement(FILE* fp) {
         const char* value = get_var(case_var + 1);
         if (value && strlen(value) > 0) {
             strcpy(case_value, value);
+        } else {
+            strcpy(case_value, "");  // Use empty string if variable not found
         }
-    }
-    else {
+    } else {
         strcpy(case_value, case_var);
     }
 
-    int pattern_matched = 0;
-    char block[MAX_BLOCK][MAX_LINE];
-    int block_len = 0;
-    int in_pattern_block = 0;
+    int found_match = 0;
+    int should_execute = 0;
+    int skip_to_esac = 0;
 
-    // Process case options
+    // Process case options until "esac"
     while (fgets(line, sizeof(line), fp)) {
         line[strcspn(line, "\r\n")] = 0;
 
         // Check for end of case
         if (strcmp(line, "esac") == 0) {
-            break;
+            return;
         }
 
-        // Skip empty lines
-        if (strlen(line) == 0) continue;
+        // Check if this is a pattern line (contains ')')
+        char* pattern_end = strchr(line, ')');
+        if (pattern_end) {
+            // Extract pattern before ')'
+            char temp_line[MAX_LINE];
+            strcpy(temp_line, line);
+            temp_line[pattern_end - line] = '\0';
+            
+            char* pattern = temp_line;
+            // Skip leading spaces
+            while (*pattern == ' ' || *pattern == '\t') pattern++;
 
-        // Check if this is a pattern line
-        if (is_case_pattern(line) && !in_pattern_block) {
-            char* pattern_end = strchr(line, ')');
-            if (pattern_end) {
-                *pattern_end = '\0';
-                char* pattern = line;
+            // Remove quotes if present
+            int len = strlen(pattern);
+            if (len >= 2 &&
+                ((pattern[0] == '"' && pattern[len - 1] == '"') ||
+                    (pattern[0] == '\'' && pattern[len - 1] == '\''))) {
+                pattern[len - 1] = '\0';
+                pattern++;
+            }
 
-                while (*pattern == ' ' || *pattern == '\t') pattern++;
+            // Check if this pattern matches
+            if (!found_match && (strcmp(pattern, case_value) == 0 || strcmp(pattern, "*") == 0)) {
+                found_match = 1;
+                should_execute = 1;
+            } else {
+                should_execute = 0;  // This pattern doesn't match
+            }
 
-                // Remove quotes
-                int len = strlen(pattern);
-                if (len >= 2 &&
-                    ((pattern[0] == '"' && pattern[len - 1] == '"') ||
-                        (pattern[0] == '\'' && pattern[len - 1] == '\''))) {
-                    pattern[len - 1] = '\0';
-                    pattern++;
-                }
-
-                // Check if pattern matches
-                if (!pattern_matched &&
-                    (strcmp(pattern, case_value) == 0 || strcmp(pattern, "*") == 0)) {
-                    pattern_matched = 1;
-                    in_pattern_block = 1;
-                    block_len = 0;
-
-                    // Check for command on same line
-                    char* cmd_after = pattern_end + 1;
-                    while (*cmd_after == ' ' || *cmd_after == '\t') cmd_after++;
-
-                    if (strlen(cmd_after) > 0 && strcmp(cmd_after, ";;") != 0) {
-                        strcpy(block[block_len++], cmd_after);
+            // Check if there are commands after the ')'
+            char* cmd_start = line + (pattern_end - temp_line) + 1;
+            while (*cmd_start == ' ' || *cmd_start == '\t') cmd_start++;
+            
+            // If there are commands on the same line as the pattern
+            if (strlen(cmd_start) > 0) {
+                char* double_semicolon = strstr(cmd_start, ";;");
+                if (double_semicolon) {
+                    // Command ends with ;;
+                    *double_semicolon = '\0';
+                    // Trim trailing spaces
+                    char* end_ptr = double_semicolon - 1;
+                    while (end_ptr > cmd_start && (*end_ptr == ' ' || *end_ptr == '\t')) {
+                        *end_ptr = '\0';
+                        end_ptr--;
                     }
+                    
+                    if (strlen(cmd_start) > 0 && should_execute) {
+                        execute_conditional_commands(cmd_start);
+                    }
+                    // After ;;, we've completed this case option
+                    if (should_execute) {
+                        skip_to_esac = 1;  // Skip remaining case options
+                    }
+                } else {
+                    // Command continues until ;;
+                    if (should_execute) {
+                        execute_conditional_commands(cmd_start);
+                    }
+                    // Don't set skip_to_esac yet, we need to continue looking for ;;
                 }
             }
+            // If no commands on same line, commands will be on following lines
+            // The should_execute flag is set, so we'll execute commands until ;;
         }
+        // Check if line is ;;
         else if (strcmp(line, ";;") == 0) {
-            // End of current case block
-            if (in_pattern_block && pattern_matched) {
-                // Execute the matched block
-                for (int i = 0; i < block_len; i++) {
-                    execute_conditional_commands(block[i]);
-                }
-                // Skip to esac (esac line will be consumed by the loop condition)
-                while (fgets(line, sizeof(line), fp)) {
-                    line[strcspn(line, "\r\n")] = 0;
-                    if (strcmp(line, "esac") == 0) break;
-                }
-                // The function will return naturally after processing all case options
+            if (should_execute) {
+                skip_to_esac = 1;  // Skip remaining case options after executing one
             }
-            in_pattern_block = 0;
-            block_len = 0;
+            should_execute = 0;  // Reset execution flag for next case option
         }
-        else if (in_pattern_block) {
-            // Collect commands in matched block
-            strcpy(block[block_len++], line);
+        // Regular command line inside a case option
+        else if (should_execute) {
+            // This is a command inside a matching case option
+            char* trimmed_line = line;
+            while (*trimmed_line == ' ' || *trimmed_line == '\t') trimmed_line++;
+            
+            if (strcmp(trimmed_line, ";;") == 0) {
+                // Found ;;, end of this case option
+                skip_to_esac = 1;  // Skip remaining case options after executing one
+                should_execute = 0; // Reset execution flag
+            } else {
+                // Execute the command
+                execute_conditional_commands(line);
+            }
+        }
+        
+        // If we found a match and executed it, skip to esac
+        if (skip_to_esac) {
+            // Continue reading until we find esac
+            while (fgets(line, sizeof(line), fp)) {
+                line[strcspn(line, "\r\n")] = 0;
+                if (strcmp(line, "esac") == 0) {
+                    return;  // Exit function when we find esac
+                }
+            }
+            return;  // In case we reach EOF
         }
     }
 }
